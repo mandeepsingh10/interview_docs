@@ -1,0 +1,80 @@
+name: Deploy-to-k8s
+
+on:
+  push:
+    branches: [ main ] ## Assumption - We only want to deploy to the k8s cluster when code is pushed to master branch.
+
+env:
+  ECR_REPOSITORY: nginx-app
+  EKS_CLUSTER_NAME: my-org-dev-01 
+  AWS_REGION: us-east-1
+
+jobs:
+  
+  deploy_to_k8s:
+    name: K8s-Deployment
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Set short git commit SHA
+      id: commit
+      uses: prompt/actions-commit-hash@v3
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.CICD_TOKEN }}
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }} #Variable defined at repo/org level
+        aws-region: us-east-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+      with:
+        mask-password: 'true'
+
+    - name: Build docker image tag, and push image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}        
+        IMAGE_TAG: ${{ steps.commit.outputs.short }}
+      run: docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f docker/Dockerfile .
+
+    - name: Scan image for vulnerabilities
+      continue-on-error: true # change this if you want the job to fail if trivy vulnerabilities are found
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        format: 'table'
+        exit-code: '1'
+        ignore-unfixed: true
+        vuln-type: 'os,library'
+        severity: 'CRITICAL,HIGH'
+
+    - name: Push image to Amazon ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}        
+        IMAGE_TAG: ${{ steps.commit.outputs.short }}
+      run: docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - name: Update kube config
+      run: aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_REGION
+
+    - name: Deploy to EKS
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}        
+        IMAGE_TAG: ${{ steps.commit.outputs.short }}
+      run: |
+        sed -i.bak "s|DOCKER_IMAGE|$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG|g" manifests/nginx.yaml && \
+        kubectl apply -f manifests/nginx.yaml
+
+    - name: Run Kube-Bench to check cluster config
+      continue-on-error: true
+      run: |
+        kubectl apply -f https://raw.githubusercontent.com/aquasecurity/kube-bench/master/job-eks.yaml
+        sleep 30s
+        kubectl logs job.batch/kube-bench
+        kubectl delete job.batch/kube-bench
