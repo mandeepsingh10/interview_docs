@@ -46,4 +46,8 @@ spec:
       storageClassName: "my-storage-class"
       resources:
         requests:
-          storage: 1Gi
+          memory: "256Mi"
+          cpu: "250m"
+        limits:
+          memory: "512Mi"
+          cpu: "500m"
