@@ -20,3 +20,4 @@
 16. SQS, SNS
 17. EKS upgrade
 18. KEDA 
+19. Policy as a code - OpenPolicy agent, Sentinel
